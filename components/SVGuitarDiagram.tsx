@@ -1,166 +1,120 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef } from "react";
-import type { NoteName } from "@/lib/music/constants";
+import { useEffect, useMemo, useRef } from "react";
+import type { Chord, ChordSettings, Finger } from "svguitar";
+import type { Tuning } from "@/lib/music/constants";
+import type { Fret } from "@/lib/music/finder";
 
 /**
- * We feed SVGuitar a 4-string “guitar” diagram for bouzouki GDAE.
- * Important mapping choice:
- * - Your app stores strings low→high as [G, D, A, E]
- * - SVGuitar string numbers are typically 1..N from high→low (common chord-diagram convention)
- * So we map:
- *   index 0 (low G) -> string 4
- *   index 1 (D)     -> string 3
- *   index 2 (A)     -> string 2
- *   index 3 (high E)-> string 1
+ * Renders a 4-course bouzouki chord diagram with SVGuitar.
+ *
+ * The app stores strings low→high (e.g. [G, D, A, E]); SVGuitar numbers
+ * strings 1..N from high→low, so index 0 (low G) maps to string 4.
  */
 export type SVGuitarDiagramProps = {
   title?: string;
-  frets: Array<number | "x">; // [G, D, A, E] capo-relative
-  tuning?: [NoteName, NoteName, NoteName, NoteName]; // default ["G","D","A","E"]
-  orientation?: "vertical" | "horizontal";
-  size?: "xs" | "sm" | "md";
+  frets: Fret[]; // low→high, capo-relative
+  tuning: Tuning;
+  size?: "sm" | "md";
   className?: string;
 };
 
-const DEFAULT_TUNING: [NoteName, NoteName, NoteName, NoteName] = [
-  "G",
-  "D",
-  "A",
-  "E",
-];
-
-function sizeConfig(size: SVGuitarDiagramProps["size"]) {
-  // Keep it compact for tables/strips; tweak as you like
-  switch (size) {
-    case "xs":
-      return {
-        frets: 4,
-        titleFontSize: 22,
-        tuningsFontSize: 16,
-        fingerTextSize: 14,
-        strokeWidth: 2,
-        nutWidth: 8,
-      };
-    case "sm":
-      return {
-        frets: 4,
-        titleFontSize: 28,
-        tuningsFontSize: 18,
-        fingerTextSize: 16,
-        strokeWidth: 2,
-        nutWidth: 10,
-      };
-    default:
-      return {
-        frets: 5,
-        titleFontSize: 45,
-        tuningsFontSize: 40,
-        fingerTextSize: 30,
-        strokeWidth: 2,
-        nutWidth: 20,
-      };
-  }
-}
+const SIZE = {
+  sm: {
+    frets: 4,
+    titleFontSize: 28,
+    tuningsFontSize: 26,
+    fingerTextSize: 16,
+    nutWidth: 10,
+    className: "w-24 h-28",
+  },
+  md: {
+    frets: 5,
+    titleFontSize: 45,
+    tuningsFontSize: 36,
+    fingerTextSize: 30,
+    nutWidth: 20,
+    className: "w-32 h-40",
+  },
+} as const;
 
 export default function SVGuitarDiagram({
   title,
   frets,
-  tuning = DEFAULT_TUNING,
-  orientation = "vertical",
-  size = "sm",
+  tuning,
+  size = "md",
   className,
 }: SVGuitarDiagramProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const cfg = SIZE[size];
 
-  const chordSpec = useMemo(() => {
-    const fingers: any[] = [];
+  const chord = useMemo<Chord>(() => {
+    const fretted = frets.filter((f): f is number => f !== "x" && f > 0);
+    const highest = fretted.length ? Math.max(...fretted) : 0;
+    // Shift the window up the neck when the shape doesn't fit from the nut.
+    const position =
+      highest > cfg.frets ? Math.min(...fretted) : 1;
 
-    frets.forEach((f, idxLowToHigh) => {
-      const svguitarString = 4 - idxLowToHigh; // G(0)->4 ... E(3)->1
-
-      if (f === "x") {
-        fingers.push([svguitarString, "x"]);
-      } else {
-        fingers.push([svguitarString, f]); // 0=open, 1..N fretted
-      }
+    const fingers: Finger[] = frets.map((f, i) => {
+      const string = frets.length - i;
+      if (f === "x" || f === 0) return [string, f];
+      return [string, f - position + 1];
     });
 
-    return {
-      fingers,
-      barres: [], // ✅ IMPORTANT: prevent undefined.forEach crash
-      title: title ?? "",
-      position: 1,
-    };
-  }, [frets, title]);
+    return { fingers, barres: [], position, title: title ?? "" };
+  }, [frets, title, cfg.frets]);
 
-  const config = useMemo(() => {
-    const base = sizeConfig(size);
-
-    return {
-      orientation, // SVGuitar supports 'vertical'/'horizontal' :contentReference[oaicite:2]{index=2}
-      style: "normal",
-      strings: 4, // bouzouki: 4 courses
-      frets: base.frets,
-      tuning: [...tuning], // labels under strings :contentReference[oaicite:3]{index=3}
-      title: title ?? "",
-      titleFontSize: base.titleFontSize,
-      tuningsFontSize: base.tuningsFontSize,
-      fingerTextSize: base.fingerTextSize,
-      strokeWidth: base.strokeWidth,
-      nutWidth: base.nutWidth,
+  const settings = useMemo<ChordSettings>(
+    () => ({
+      strings: tuning.length,
+      frets: cfg.frets,
+      tuning: [...tuning],
+      titleFontSize: cfg.titleFontSize,
+      tuningsFontSize: cfg.tuningsFontSize,
+      fingerTextSize: cfg.fingerTextSize,
+      nutWidth: cfg.nutWidth,
+      strokeWidth: 2,
       backgroundColor: "none",
-      // helpful compactness tweaks:
+      color: "currentColor",
       titleBottomMargin: 0,
-      sidePadding: 0.18,
+      sidePadding: 0.2,
       fretSize: 1.35,
       fingerSize: 0.68,
       emptyStringIndicatorSize: 0.55,
       showFretMarkers: false,
-    } as const;
-  }, [orientation, size, title, tuning]);
+      fixedDiagramPosition: true,
+    }),
+    [tuning, cfg]
+  );
 
   useEffect(() => {
     let cancelled = false;
+    const host = hostRef.current;
 
-    async function draw() {
-      if (!hostRef.current) return;
-
-      // Clear previous SVG
-      hostRef.current.innerHTML = "";
-
-      // Dynamic import to avoid SSR issues (SVGuitar uses DOM APIs)
-      const mod = await import("svguitar");
-      if (cancelled) return;
-
-      const { SVGuitarChord } = mod as any;
-
-      const chart = new SVGuitarChord(hostRef.current);
-      chart.configure(config).chord(chordSpec).draw();
-
-      // Make the produced SVG responsive inside our container
-      const svg = hostRef.current.querySelector("svg");
+    // Dynamic import keeps SVGuitar (which needs the DOM) out of SSR.
+    import("svguitar").then(({ SVGuitarChord }) => {
+      if (cancelled || !host) return;
+      host.innerHTML = "";
+      new SVGuitarChord(host).configure(settings).chord(chord).draw();
+      const svg = host.querySelector("svg");
       if (svg) {
         svg.setAttribute("width", "100%");
         svg.setAttribute("height", "100%");
         svg.style.display = "block";
       }
-    }
-
-    draw();
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [chordSpec, config]);
-
-  // Use aspect-friendly sizing; SVG itself becomes responsive via width/height 100%
-  const sizeClass =
-    size === "xs" ? "w-24 h-20" : size === "sm" ? "w-32 h-24" : "w-44 h-32";
+  }, [chord, settings]);
 
   return (
-    <div className={["shrink-0", sizeClass, className ?? ""].join(" ")}>
-      <div ref={hostRef} className="h-full w-full" />
-    </div>
+    <div
+      ref={hostRef}
+      className={["shrink-0", cfg.className, className ?? ""].join(" ")}
+      role="img"
+      aria-label={`Frets ${frets.join(" ")}`}
+    />
   );
 }

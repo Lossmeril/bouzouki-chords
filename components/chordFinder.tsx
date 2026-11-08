@@ -1,427 +1,530 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import {
   CHORD_QUALITIES,
+  MAX_CAPO,
+  NOTES_SHARP,
+  TUNINGS,
   type ChordQualityId,
   type NoteName,
-  NOTES_SHARP,
+  type TuningId,
 } from "@/lib/music/constants";
-import { findChordFingeringsGDAE, type Fingering } from "@/lib/music/finder";
+import {
+  findChordFingerings,
+  rateCapos,
+  type Fingering,
+  type SearchSettings,
+} from "@/lib/music/finder";
 import { formatFingering } from "@/lib/music/format";
+import { transpose } from "@/lib/music/notes";
+import { parseChordList } from "@/lib/music/parse";
 import SVGuitarDiagram from "@/components/SVGuitarDiagram";
-
-const ROOTS: readonly NoteName[] = NOTES_SHARP;
 
 type ChordEntry = {
   id: string;
   root: NoteName;
   quality: ChordQualityId;
-  capo: number;
+};
 
-  // search params (kept per chord so each chord can be optimized differently if desired)
-  maxFret: number;
-  maxSpan: number;
-  maxResults: number;
-
-  // user-selected voicing index into generated results
-  selectedIndex: number; // default 0
+const DEFAULT_SEARCH: SearchSettings = {
+  maxFret: 12,
+  maxSpan: 4,
+  maxResults: 24,
 };
 
 function uid() {
-  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+  return crypto.randomUUID();
 }
 
 function clamp(n: number, min: number, max: number) {
+  if (Number.isNaN(n)) return min;
   return Math.max(min, Math.min(max, n));
 }
 
-function chordLabel(root: NoteName, quality: ChordQualityId) {
-  const q = CHORD_QUALITIES.find((x) => x.id === quality)?.label ?? quality;
-  return `${root} ${q}`;
+function chordSymbol(root: NoteName, quality: ChordQualityId) {
+  const q = CHORD_QUALITIES.find((x) => x.id === quality);
+  return `${root}${q?.symbol ?? quality}`;
 }
 
+const card = "rounded-2xl border border-slate-200 dark:border-slate-700";
+const control =
+  "rounded-xl border border-slate-300 bg-white px-3 py-2 dark:border-slate-600 dark:bg-slate-900";
+const primaryButton =
+  "rounded-xl bg-slate-900 px-4 py-2 font-medium text-white hover:bg-slate-700 disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300";
+
 export default function ChordFinder() {
-  // “New chord” form state
-  const [newRoot, setNewRoot] = useState<NoteName>("G");
-  const [newQuality, setNewQuality] = useState<ChordQualityId>("maj");
-  const [newCapo, setNewCapo] = useState<number>(0);
+  const [chords, setChords] = useState<ChordEntry[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
 
-  const [newMaxFret, setNewMaxFret] = useState<number>(12);
-  const [newMaxSpan, setNewMaxSpan] = useState<number>(4);
-  const [newMaxResults, setNewMaxResults] = useState<number>(25);
+  const [tuningId, setTuningId] = useState<TuningId>("GDAE");
+  const [capo, setCapo] = useState(0);
+  const [search, setSearch] = useState<SearchSettings>(DEFAULT_SEARCH);
 
-  const [chords, setChords] = useState<ChordEntry[]>([
-    {
-      id: uid(),
-      root: "G",
-      quality: "maj",
-      capo: 0,
-      maxFret: 12,
-      maxSpan: 4,
-      maxResults: 25,
-      selectedIndex: 0,
-    },
-  ]);
+  // Chosen voicing per chord, remembered separately for every tuning+capo.
+  const [selections, setSelections] = useState<Record<string, number>>({});
 
-  const [activeId, setActiveId] = useState<string>(chords[0].id);
+  const [text, setText] = useState("");
+  const [invalid, setInvalid] = useState<string[]>([]);
+  const [pickRoot, setPickRoot] = useState<NoteName>("G");
+  const [pickQuality, setPickQuality] = useState<ChordQualityId>("maj");
 
-  const activeChord = chords.find((c) => c.id === activeId) ?? chords[0];
+  const tuning = TUNINGS[tuningId];
+  const settings: SearchSettings = {
+    maxFret: clamp(search.maxFret, 3, 24),
+    maxSpan: clamp(search.maxSpan, 1, 8),
+    maxResults: clamp(search.maxResults, 4, 100),
+  };
+  const { maxFret, maxSpan, maxResults } = settings;
 
-  const activeResults = useMemo(() => {
-    if (!activeChord) return [];
-    return findChordFingeringsGDAE({
-      root: activeChord.root,
-      quality: activeChord.quality,
-      capo: clamp(activeChord.capo, 0, 12),
-      maxFret: clamp(activeChord.maxFret, 3, 24),
-      maxSpan: clamp(activeChord.maxSpan, 1, 8),
-      maxResults: clamp(activeChord.maxResults, 5, 100),
-    });
-  }, [activeChord]);
+  const selectionKey = (id: string) => `${id}|${tuningId}|${capo}`;
 
-  function addChord() {
-    const entry: ChordEntry = {
-      id: uid(),
-      root: newRoot,
-      quality: newQuality,
-      capo: clamp(newCapo, 0, 12),
-      maxFret: clamp(newMaxFret, 3, 24),
-      maxSpan: clamp(newMaxSpan, 1, 8),
-      maxResults: clamp(newMaxResults, 5, 100),
-      selectedIndex: 0,
-    };
-    setChords((prev) => [...prev, entry]);
-    setActiveId(entry.id);
+  // All voicings for every chord at the current capo/tuning.
+  const voicings = useMemo(() => {
+    const map = new Map<string, Fingering[]>();
+    for (const c of chords) {
+      map.set(
+        c.id,
+        findChordFingerings({
+          root: c.root,
+          quality: c.quality,
+          capo,
+          tuning,
+          maxFret,
+          maxSpan,
+          maxResults,
+        })
+      );
+    }
+    return map;
+  }, [chords, capo, tuning, maxFret, maxSpan, maxResults]);
+
+  // How easy the whole song is at each capo position.
+  const ratings = useMemo(() => {
+    const unique = new Map<string, ChordEntry>();
+    for (const c of chords) unique.set(`${c.root}${c.quality}`, c);
+    if (unique.size === 0) return null;
+    return rateCapos(
+      [...unique.values()],
+      tuning,
+      { maxFret, maxSpan, maxResults: 1 },
+      MAX_CAPO
+    );
+  }, [chords, tuning, maxFret, maxSpan]);
+
+  const bestCapo = ratings
+    ? ratings.reduce((best, r) =>
+        r.missing < best.missing ||
+        (r.missing === best.missing && r.total < best.total)
+          ? r
+          : best
+      ).capo
+    : null;
+
+  const activeChord = chords.find((c) => c.id === activeId) ?? null;
+  const activeVoicings = activeChord ? (voicings.get(activeChord.id) ?? []) : [];
+
+  function selectedIndex(id: string) {
+    const list = voicings.get(id) ?? [];
+    return clamp(selections[selectionKey(id)] ?? 0, 0, Math.max(0, list.length - 1));
+  }
+
+  function addChords(list: Array<{ root: NoteName; quality: ChordQualityId }>) {
+    if (list.length === 0) return;
+    const entries = list.map((c) => ({ ...c, id: uid() }));
+    setChords((prev) => [...prev, ...entries]);
+    setActiveId((prev) => prev ?? entries[0].id);
+  }
+
+  function onSubmitText(e: FormEvent) {
+    e.preventDefault();
+    const { chords: parsed, invalid: bad } = parseChordList(text);
+    addChords(parsed);
+    setInvalid(bad);
+    setText(bad.join(" "));
   }
 
   function removeChord(id: string) {
-    setChords((prev) => {
-      const next = prev.filter((c) => c.id !== id);
-      if (next.length === 0) {
-        const fresh: ChordEntry = {
-          id: uid(),
-          root: "G",
-          quality: "maj",
-          capo: 0,
-          maxFret: 12,
-          maxSpan: 4,
-          maxResults: 25,
-          selectedIndex: 0,
-        };
-        setActiveId(fresh.id);
-        return [fresh];
-      }
-      // if removing active, move active to first
-      if (id === activeId) setActiveId(next[0].id);
-      return next;
-    });
+    const next = chords.filter((c) => c.id !== id);
+    setChords(next);
+    if (activeId === id) setActiveId(next[0]?.id ?? null);
   }
 
-  function updateChord(id: string, patch: Partial<ChordEntry>) {
-    setChords((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, ...patch } : c))
-    );
+  function clearChords() {
+    setChords([]);
+    setActiveId(null);
+    setSelections({});
   }
-
-  // helper: compute selected fingering for each chord
-  const selectedByChord = useMemo(() => {
-    const map = new Map<string, Fingering | null>();
-    for (const c of chords) {
-      const res = findChordFingeringsGDAE({
-        root: c.root,
-        quality: c.quality,
-        capo: clamp(c.capo, 0, 12),
-        maxFret: clamp(c.maxFret, 3, 24),
-        maxSpan: clamp(c.maxSpan, 1, 8),
-        maxResults: clamp(c.maxResults, 5, 100),
-      });
-      const idx = clamp(c.selectedIndex, 0, Math.max(0, res.length - 1));
-      map.set(c.id, res[idx] ?? null);
-    }
-    return map;
-  }, [chords]);
 
   return (
     <div className="space-y-6">
-      {/* Add chord */}
-      <section className="rounded-2xl border border-slate-200 p-4 md:p-6 shadow-sm space-y-4">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold">Song chords</h2>
+      {/* 1. Chords */}
+      <section className={`${card} space-y-4 p-4 md:p-6`}>
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold">1. Song chords</h2>
             <p className="text-sm opacity-70">
-              Add chords, then pick a voicing for each one.
+              Enter the chords as written in the song (concert pitch).
             </p>
           </div>
-          <div
-            onClick={addChord}
-            className="rounded-xl border border-slate-200 px-4 py-2 shadow-sm hover:bg-black/5"
+          {chords.length > 0 && (
+            <button
+              type="button"
+              onClick={clearChords}
+              className="text-sm underline opacity-70 hover:opacity-100"
+            >
+              Clear all
+            </button>
+          )}
+        </div>
+
+        <form onSubmit={onSubmitText} className="flex flex-wrap gap-2">
+          <input
+            className={`${control} min-w-0 flex-1`}
+            placeholder="e.g. G Em C D7 Bm F#m"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            aria-label="Chord symbols"
+          />
+          <button type="submit" className={primaryButton} disabled={!text.trim()}>
+            Add
+          </button>
+        </form>
+        {invalid.length > 0 && (
+          <p className="text-sm text-red-600 dark:text-red-400">
+            Didn&apos;t recognise: {invalid.join(", ")}
+          </p>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="opacity-70">or pick:</span>
+          <select
+            className={control}
+            value={pickRoot}
+            onChange={(e) => setPickRoot(e.target.value as NoteName)}
+            aria-label="Root"
           >
-            + Add chord
-          </div>
+            {NOTES_SHARP.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+          <select
+            className={control}
+            value={pickQuality}
+            onChange={(e) => setPickQuality(e.target.value as ChordQualityId)}
+            aria-label="Quality"
+          >
+            {CHORD_QUALITIES.map((q) => (
+              <option key={q.id} value={q.id}>
+                {q.label}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className={`${control} hover:bg-slate-100 dark:hover:bg-slate-800`}
+            onClick={() => addChords([{ root: pickRoot, quality: pickQuality }])}
+          >
+            + Add {chordSymbol(pickRoot, pickQuality)}
+          </button>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-3">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Root</label>
-            <select
-              className="w-full rounded-xl border border-slate-200 px-3 py-2"
-              value={newRoot}
-              onChange={(e) => setNewRoot(e.target.value as NoteName)}
-            >
-              {ROOTS.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Quality</label>
-            <select
-              className="w-full rounded-xl border border-slate-200 px-3 py-2"
-              value={newQuality}
-              onChange={(e) => setNewQuality(e.target.value as ChordQualityId)}
-            >
-              {CHORD_QUALITIES.map((q) => (
-                <option key={q.id} value={q.id}>
-                  {q.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Capo (fret)</label>
-            <input
-              className="w-full"
-              type="range"
-              min={0}
-              max={12}
-              value={newCapo}
-              onChange={(e) => setNewCapo(Number(e.target.value))}
-            />
-            <div className="text-sm opacity-80">Capo: {newCapo}</div>
-          </div>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <NumberField
-            label="Search up to fret"
-            value={newMaxFret}
-            setValue={setNewMaxFret}
-            min={3}
-            max={24}
-          />
-          <NumberField
-            label="Max fret span"
-            value={newMaxSpan}
-            setValue={setNewMaxSpan}
-            min={1}
-            max={8}
-          />
-          <NumberField
-            label="Max results"
-            value={newMaxResults}
-            setValue={setNewMaxResults}
-            min={5}
-            max={100}
-          />
-        </div>
+        {chords.length > 0 ? (
+          <ul className="flex flex-wrap gap-2">
+            {chords.map((c) => (
+              <li
+                key={c.id}
+                className="flex items-center gap-1 rounded-full border border-slate-300 py-1 pr-1 pl-3 text-sm dark:border-slate-600"
+              >
+                <span className="font-medium">{chordSymbol(c.root, c.quality)}</span>
+                <button
+                  type="button"
+                  onClick={() => removeChord(c.id)}
+                  className="grid h-6 w-6 place-content-center rounded-full hover:bg-red-100 hover:text-red-700 dark:hover:bg-red-950 dark:hover:text-red-300"
+                  aria-label={`Remove ${chordSymbol(c.root, c.quality)}`}
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm opacity-60">No chords yet.</p>
+        )}
       </section>
 
-      {/* Overview: compact chord table / horizontal strip */}
-      <section className="rounded-2xl border border-slate-200 p-4 md:p-6 shadow-sm space-y-4">
+      {/* 2. Tuning + capo */}
+      <section className={`${card} space-y-4 p-4 md:p-6`}>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-lg font-semibold">Chord overview</h3>
-            <div className="text-sm opacity-70">{chords.length} total</div>
+          <h2 className="text-xl font-semibold">2. Tuning &amp; capo</h2>
+          <div
+            className="inline-flex rounded-xl border border-slate-300 p-1 dark:border-slate-600"
+            role="radiogroup"
+            aria-label="Tuning"
+          >
+            {(Object.keys(TUNINGS) as TuningId[]).map((id) => (
+              <button
+                key={id}
+                type="button"
+                role="radio"
+                aria-checked={tuningId === id}
+                onClick={() => setTuningId(id)}
+                className={[
+                  "rounded-lg px-3 py-1 font-mono text-sm",
+                  tuningId === id
+                    ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                    : "hover:bg-slate-100 dark:hover:bg-slate-800",
+                ].join(" ")}
+              >
+                {id}
+              </button>
+            ))}
           </div>
         </div>
 
-        <div className="overflow-x-auto relative">
-          <div className="grid grid-cols-4 gap-2 w-full  pb-1">
-            {chords.map((c, i) => {
-              const selected = selectedByChord.get(c.id);
-              const formatted = selected ? formatFingering(selected) : null;
+        <CapoPicker
+          capo={capo}
+          setCapo={setCapo}
+          ratings={ratings}
+          bestCapo={bestCapo}
+        />
+
+        <details className="text-sm">
+          <summary className="cursor-pointer opacity-70">Search settings</summary>
+          <div className="mt-3 grid gap-4 sm:grid-cols-3">
+            <NumberField
+              label="Search up to fret (above capo)"
+              value={search.maxFret}
+              setValue={(n) => setSearch((s) => ({ ...s, maxFret: n }))}
+              min={3}
+              max={24}
+            />
+            <NumberField
+              label="Max fret span"
+              value={search.maxSpan}
+              setValue={(n) => setSearch((s) => ({ ...s, maxSpan: n }))}
+              min={1}
+              max={8}
+            />
+            <NumberField
+              label="Voicings to show"
+              value={search.maxResults}
+              setValue={(n) => setSearch((s) => ({ ...s, maxResults: n }))}
+              min={4}
+              max={100}
+            />
+          </div>
+        </details>
+      </section>
+
+      {/* 3. Overview */}
+      {chords.length > 0 && (
+        <section className={`${card} space-y-4 p-4 md:p-6`}>
+          <div>
+            <h2 className="text-xl font-semibold">
+              3. Chord sheet{" "}
+              <span className="text-base font-normal opacity-70">
+                ({tuningId}, capo {capo})
+              </span>
+            </h2>
+            <p className="text-sm opacity-70">
+              Click a chord to choose a different voicing.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+            {chords.map((c) => {
+              const list = voicings.get(c.id) ?? [];
+              const selected = list[selectedIndex(c.id)];
               const isActive = c.id === activeId;
+              const shape = chordSymbol(transpose(c.root, -capo), c.quality);
 
               return (
-                <div
+                <button
+                  type="button"
                   key={c.id}
                   onClick={() => setActiveId(c.id)}
+                  aria-pressed={isActive}
                   className={[
-                    "rounded-2xl border border-slate-200 p-3 shadow-sm text-left relative",
-                    "w-full hover:bg-red/5 ",
-                    isActive ? "bg-red/50 " : "",
+                    card,
+                    "flex flex-col items-center p-3 text-left",
+                    isActive
+                      ? "bg-amber-50 ring-2 ring-amber-400 dark:bg-amber-950/40"
+                      : "hover:bg-slate-50 dark:hover:bg-slate-800/50",
                   ].join(" ")}
-                  title="Set active chord"
                 >
-                  <div className="flex items-baseline justify-between gap-2">
-                    <div className="font-semibold">
-                      <span className="font-mono text-xs opacity-70">
-                        #{i + 1}
-                      </span>{" "}
-                      {c.root}
-                      <span className="ml-1 opacity-80">
-                        {qualityShort(c.quality)}
-                      </span>
-                    </div>
-                    <div className="font-mono text-xs opacity-70">
-                      capo {c.capo}
-                    </div>
-                  </div>
-
-                  <div className="mt-2 flex items-center justify-between gap-2">
-                    {formatted ? (
-                      <SVGuitarDiagram
-                        title=""
-                        frets={selected!.frets}
-                        orientation="vertical"
-                        size="md"
-                      />
-                    ) : (
-                      <div className="text-xs opacity-60">No voicing</div>
+                  <div className="flex w-full items-baseline justify-between gap-2">
+                    <span className="text-lg font-semibold">
+                      {chordSymbol(c.root, c.quality)}
+                    </span>
+                    {capo > 0 && (
+                      <span className="text-xs opacity-60">{shape} shape</span>
                     )}
                   </div>
-                  <div
-                    className="absolute bottom-3 right-3 p-3 w-3 h-3 aspect-square grid place-content-center border text-xs font-bold bg-red-200 border-red-300 text-red-400 rounded-md hover:bg-red-300 transition"
-                    onClick={() => removeChord(c.id)}
-                  >
-                    X
-                  </div>
-                </div>
+                  {selected ? (
+                    <SVGuitarDiagram
+                      frets={selected.frets}
+                      tuning={tuning}
+                      title={formatFingering(selected).frets.join(" ")}
+                    />
+                  ) : (
+                    <div className="grid h-40 place-content-center text-xs opacity-60">
+                      No voicing
+                    </div>
+                  )}
+                </button>
               );
             })}
           </div>
-        </div>
+        </section>
+      )}
 
-        <div className="text-xs opacity-60">
-          Tip: click a chord to make it active, then pick its voicing below.
-        </div>
-      </section>
-
-      {/* Active chord voicing picker */}
-      <section className="rounded-2xl border border-slate-200 p-4 md:p-6 shadow-sm space-y-4">
-        <div className="flex flex-wrap items-baseline justify-between gap-3">
+      {/* 4. Voicing picker */}
+      {activeChord && (
+        <section className={`${card} space-y-4 p-4 md:p-6`}>
           <div>
-            <h3 className="text-lg font-semibold">
-              Voicings for:{" "}
-              {activeChord
-                ? `${chordLabel(activeChord.root, activeChord.quality)} (capo ${
-                    activeChord.capo
-                  })`
-                : "—"}
-            </h3>
+            <h2 className="text-xl font-semibold">
+              Voicings for {chordSymbol(activeChord.root, activeChord.quality)}
+            </h2>
             <p className="text-sm opacity-70">
-              Click a voicing to set it as the one shown in the overview.
+              Easiest first. Frets are relative to the capo.
             </p>
           </div>
-        </div>
 
-        {!activeChord ? (
-          <div className="opacity-70">No active chord.</div>
-        ) : activeResults.length === 0 ? (
-          <div className="rounded-2xl border border-slate-200 p-6 opacity-80">
-            No fingerings found. Increase search range/span for this chord
-            (remove and re-add, or tell me and I’ll add per-chord editing).
-          </div>
-        ) : (
-          <div className="grid grid-cols-4 gap-3">
-            {activeResults.map((f, idx) => (
-              <VoicingCard
-                key={idx}
-                fingering={f}
-                index={idx}
-                isSelected={activeChord.selectedIndex === idx}
-                onSelect={() =>
-                  updateChord(activeChord.id, { selectedIndex: idx })
-                }
-              />
-            ))}
-          </div>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function VoicingCard({
-  fingering,
-  index,
-  isSelected,
-  onSelect,
-}: {
-  fingering: Fingering;
-  index: number;
-  isSelected: boolean;
-  onSelect: () => void;
-}) {
-  const formatted = formatFingering(fingering);
-
-  return (
-    <div
-      onClick={onSelect}
-      className={[
-        "w-full text-left rounded-2xl border border-slate-200 p-4 md:p-5 shadow-sm hover:bg-black/5",
-        isSelected ? "ring-2 ring-black/20 bg-black/5" : "",
-      ].join(" ")}
-    >
-      <div className="flex flex-wrap items-baseline justify-between gap-3">
-        <div className="space-y-1">
-          {/* <div className="text-sm opacity-70">#{index + 1}</div> */}
-          {/* <div className="text-xs font-semibold tracking-tight">
-            Frets (G–D–A–E):{" "}
-          </div> */}
-          {/* <p>
-            {" "}
-            <span className="font-mono">{formatted.frets.join(" ")}</span>
-          </p> */}
-          {/* <div className="text-xs opacity-80">
-            Notes:{" "}
-            <span className="font-mono">{formatted.notes.join(" ")}</span>
-          </div> */}
-        </div>
-
-        {/* <div className="text-sm opacity-80">
-          <div>Span: {fingering.metrics.span}</div>
-          <div>Muted: {fingering.metrics.mutedCount}</div>
-          <div>Open: {fingering.metrics.openCount}</div>
-        </div> */}
-      </div>
-
-      <div>
-        <SVGuitarDiagram
-          title={formatted.frets.join(" ")} // (or show title here if you want)
-          frets={fingering.frets}
-          orientation="vertical" // nice for detailed selection
-          size="md"
-        />
-      </div>
-    </div>
-  );
-}
-
-function MiniDiagram({ frets }: { frets: Array<string> }) {
-  const strings = ["G", "D", "A", "E"] as const;
-  return (
-    <div className="overflow-x-auto">
-      <div className="min-w-[320px] rounded-xl bg-black/5 p-3">
-        <div className="grid grid-cols-4 gap-3 font-mono text-sm">
-          {strings.map((s, i) => (
-            <div key={s} className="space-y-1">
-              <div className="text-xs opacity-70">{s}</div>
-              <div className="rounded-lg bg-white/70 px-2 py-2 text-center">
-                {frets[i]}
-              </div>
+          {activeVoicings.length === 0 ? (
+            <div className={`${card} p-6 opacity-80`}>
+              No fingerings found at capo {capo}. Try another capo, or widen the
+              search settings.
             </div>
-          ))}
-        </div>
-        <div className="mt-2 text-xs opacity-60">
-          x = mute, 0 = open (relative to capo)
-        </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+              {activeVoicings.map((f, idx) => {
+                const isSelected = selectedIndex(activeChord.id) === idx;
+                return (
+                  <button
+                    type="button"
+                    key={f.frets.join(",")}
+                    onClick={() =>
+                      setSelections((s) => ({
+                        ...s,
+                        [selectionKey(activeChord.id)]: idx,
+                      }))
+                    }
+                    aria-pressed={isSelected}
+                    className={[
+                      card,
+                      "flex flex-col items-center p-3",
+                      isSelected
+                        ? "bg-amber-50 ring-2 ring-amber-400 dark:bg-amber-950/40"
+                        : "hover:bg-slate-50 dark:hover:bg-slate-800/50",
+                    ].join(" ")}
+                  >
+                    <SVGuitarDiagram
+                      frets={f.frets}
+                      tuning={tuning}
+                      title={formatFingering(f).frets.join(" ")}
+                    />
+                    <div className="mt-1 font-mono text-xs opacity-60">
+                      {formatFingering(f).notes.join(" ")}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function CapoPicker({
+  capo,
+  setCapo,
+  ratings,
+  bestCapo,
+}: {
+  capo: number;
+  setCapo: (n: number) => void;
+  ratings: ReturnType<typeof rateCapos> | null;
+  bestCapo: number | null;
+}) {
+  const totals = ratings?.map((r) => r.total) ?? [];
+  const min = Math.min(...totals);
+  const max = Math.max(...totals);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between text-sm">
+        <label htmlFor="capo" className="font-medium">
+          Capo: <span className="font-mono">{capo === 0 ? "none" : `fret ${capo}`}</span>
+        </label>
+        {bestCapo !== null && (
+          <button
+            type="button"
+            className="text-sm underline opacity-80 hover:opacity-100"
+            onClick={() => setCapo(bestCapo)}
+          >
+            Easiest: {bestCapo === 0 ? "no capo" : `capo ${bestCapo}`}
+          </button>
+        )}
       </div>
+
+      {ratings && (
+        <div
+          className="grid h-16 items-end gap-1"
+          style={{ gridTemplateColumns: `repeat(${ratings.length}, minmax(0, 1fr))` }}
+          aria-hidden
+        >
+          {ratings.map((r) => {
+            const ease = max === min ? 1 : (max - r.total) / (max - min);
+            return (
+              <button
+                type="button"
+                tabIndex={-1}
+                key={r.capo}
+                onClick={() => setCapo(r.capo)}
+                title={
+                  r.missing
+                    ? `Capo ${r.capo}: ${r.missing} chord(s) unplayable`
+                    : `Capo ${r.capo}`
+                }
+                className={[
+                  "rounded-t",
+                  r.capo === capo
+                    ? "bg-amber-500"
+                    : r.missing
+                      ? "bg-red-300 dark:bg-red-900"
+                      : "bg-slate-300 hover:bg-slate-400 dark:bg-slate-600 dark:hover:bg-slate-500",
+                ].join(" ")}
+                style={{ height: `${10 + ease * 90}%` }}
+              />
+            );
+          })}
+        </div>
+      )}
+
+      <input
+        id="capo"
+        className="w-full accent-amber-500"
+        type="range"
+        min={0}
+        max={MAX_CAPO}
+        value={capo}
+        onChange={(e) => setCapo(Number(e.target.value))}
+      />
+      <div className="flex justify-between font-mono text-xs opacity-60">
+        {Array.from({ length: MAX_CAPO + 1 }, (_, i) => (
+          <span key={i}>{i}</span>
+        ))}
+      </div>
+      {ratings && (
+        <p className="text-xs opacity-60">
+          Taller bar = easier to play the whole song at that capo.
+        </p>
+      )}
     </div>
   );
 }
@@ -440,64 +543,19 @@ function NumberField({
   max: number;
 }) {
   return (
-    <div className="space-y-2">
-      <label className="text-sm font-medium">{label}</label>
+    <label className="space-y-1">
+      <span className="block font-medium">{label}</span>
       <input
-        className="w-full rounded-xl border border-slate-200 px-3 py-2"
+        className={`${control} w-full`}
         type="number"
         min={min}
         max={max}
-        value={value}
-        onChange={(e) => setValue(Number(e.target.value))}
+        value={Number.isNaN(value) ? "" : value}
+        onChange={(e) => setValue(e.target.valueAsNumber)}
       />
-      <div className="text-xs opacity-60">
+      <span className="block text-xs opacity-60">
         Range: {min}–{max}
-      </div>
-    </div>
-  );
-}
-
-function qualityShort(q: ChordQualityId): string {
-  switch (q) {
-    case "maj":
-      return "";
-    case "min":
-      return "m";
-    case "7":
-      return "7";
-    case "maj7":
-      return "maj7";
-    case "m7":
-      return "m7";
-    case "sus2":
-      return "sus2";
-    case "sus4":
-      return "sus4";
-    case "dim":
-      return "dim";
-    case "aug":
-      return "aug";
-    default:
-      return q;
-  }
-}
-
-// Tiny, compact “shape” display that reads well in tables + horizontal chips
-function CompactShape({ frets }: { frets: Array<string> }) {
-  // frets are strings like ["x","0","2","3"]
-  return (
-    <div className="flex items-center gap-1 font-mono text-xs">
-      {frets.map((f, idx) => (
-        <span
-          key={idx}
-          className={[
-            "inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-200 bg-white/70",
-            f === "x" ? "opacity-60" : "",
-          ].join(" ")}
-        >
-          {f}
-        </span>
-      ))}
-    </div>
+      </span>
+    </label>
   );
 }

@@ -1,36 +1,22 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Bouzouki Chord Finder
 
-## Getting Started
+Find comfortable Irish bouzouki chord voicings for a whole song.
 
-First, run the development server:
+1. Type the song's chords (e.g. `G Em C D7 Bbmaj7 F#m`) or pick them from the dropdowns.
+2. Choose the tuning: **GDAE** or **GDAD**.
+3. Slide the capo. Every chord is re-voiced for that capo, and the bar chart above the slider shows how easy the whole song is at each capo position (taller = easier).
+4. Click a chord in the sheet to choose a different voicing. Choices are remembered per tuning and capo.
+
+Frets in diagrams are relative to the capo.
+
+## Development
+
+Requires Node 24 (see `.nvmrc`) and Yarn 1 (pinned via `packageManager`, works with corepack).
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+nvm use
+yarn install
+yarn dev     # http://localhost:3000
+yarn lint
+yarn build
 ```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
